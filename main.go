@@ -10,13 +10,15 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/gorilla/mux"
 )
 
-func serveBot(api tgapi.Api) {
+func serveBot(tg tgapi.Api) {
 	updateOffset := 0
 
 	for {
-		updates, err := api.GetUpdates(updateOffset, 100, 100, nil)
+		updates, err := tg.GetUpdates(updateOffset, 100, 100, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to poll: %v\n", err)
 			continue
@@ -46,7 +48,7 @@ func serveBot(api tgapi.Api) {
 					}
 				}
 
-				_, err = api.SendMessage(&tgapi.NewMessage{
+				_, err = tg.SendMessage(&tgapi.NewMessage{
 					ChatId: v.Chat.Id,
 					Text:   sb.String(),
 				})
@@ -58,80 +60,75 @@ func serveBot(api tgapi.Api) {
 	}
 }
 
-func apiHandler(api tgapi.Api) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 1 && parts[0] == "" {
-			if r.Method == "GET" {
-				w.WriteHeader(http.StatusOK)
-				fmt.Fprintf(w, "Message Relay Bot API")
-				return
-			}
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			fmt.Fprintf(w, "Method not allowed")
-			return
-		}
-		if parts[0] == "u" {
-			if len(parts) != 3 {
-				w.WriteHeader(http.StatusNotFound)
-				fmt.Fprintf(w, "This endpoint doesn't exist")
-				return
-			}
-			if parts[2] != "message" {
-				w.WriteHeader(http.StatusNotFound)
-				fmt.Fprintf(w, "This endpoint doesn't exist")
-				return
-			}
-			if r.Method == "GET" {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusOK)
-				fmt.Fprintf(w, `<form method="POST"><label for="message">Message:</label><textarea name="message"></textarea><br><button type="submit">Send</button></form>`)
-				return
-			}
-			if r.Method == "POST" {
-				err := r.ParseForm()
-				if err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					fmt.Fprintf(w, "Error parsing form: %v", err)
-					return
-				}
+func serveRoot(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "Message Relay Bot API")
+}
 
-				text := r.FormValue("message")
-				if text == "" {
-					w.WriteHeader(http.StatusBadRequest)
-					fmt.Fprintf(w, "Missing message text")
-					return
-				}
+func userMessagePage(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
 
-				chatId, err := strconv.ParseInt(parts[1], 10, 0)
-				if err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					fmt.Fprintf(w, "Invalid chat id: %v", err)
-					return
-				}
-				_, err = api.SendMessage(&tgapi.NewMessage{
-					ChatId: int(chatId),
-					Text:   text,
-				})
-
-				// TODO: different responses for different errors
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					fmt.Fprintf(w, "Error sending message: %v", err)
-					return
-				}
-
-				w.WriteHeader(http.StatusOK)
-				fmt.Fprintf(w, "Message sent")
-				return
-			}
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			fmt.Fprintf(w, "Method not allowed")
-			return
-		}
+	// just check that id can be parsed
+	_, err := strconv.ParseInt(vars["id"], 10, 0)
+	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprintf(w, "This endpoint doesn't exist")
+		fmt.Fprintf(w, "User not found")
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `<form method="POST"><label for="message">Message:</label><textarea name="message"></textarea><br><button type="submit">Send</button></form>`)
+}
+
+// TODO: use api object for handler ctx
+func userMessageSend(tg tgapi.Api) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+
+		chatId, err := strconv.ParseInt(vars["id"], 10, 0)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, "User not found")
+			return
+		}
+
+		err = r.ParseForm()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "Error parsing form: %v", err)
+			return
+		}
+
+		text := r.FormValue("message")
+		if text == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "Missing message text")
+			return
+		}
+
+		_, err = tg.SendMessage(&tgapi.NewMessage{
+			ChatId: int(chatId),
+			Text:   text,
+		})
+
+		// TODO: different responses for different errors
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "Error sending message: %v", err)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "Message sent")
+	}
+}
+
+func serveApi(addr string, api tgapi.Api) {
+	r := mux.NewRouter()
+	r.StrictSlash(true)
+	r.HandleFunc("/", serveRoot).Methods("GET")
+	r.HandleFunc("/u/{id}/message", userMessagePage).Methods("GET")
+	r.HandleFunc("/u/{id}/message", userMessageSend(api)).Methods("POST")
+	http.ListenAndServe(addr, r)
 }
 
 func main() {
@@ -140,16 +137,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Missing env var: TG_BOT_TOKEN")
 		os.Exit(1)
 	}
-
-	api := tgapi.New(token)
+	tg := tgapi.New(token)
 
 	fmt.Println("Starting bot service")
-	go serveBot(api)
+	go serveBot(tg)
+
 	addr := os.Getenv("API_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 	fmt.Printf("Starting api service on %s\n", addr)
-	http.HandleFunc("/", apiHandler(api))
-	http.ListenAndServe(addr, nil)
+	serveApi(addr, tg)
 }
