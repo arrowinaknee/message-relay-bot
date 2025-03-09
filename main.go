@@ -3,15 +3,12 @@ package main
 import (
 	"fmt"
 	"math/rand"
+	"message-relay-bot/pkg/api"
 	"message-relay-bot/pkg/tgapi"
-	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/gorilla/mux"
 )
 
 func serveBot(tg tgapi.Api) {
@@ -60,77 +57,6 @@ func serveBot(tg tgapi.Api) {
 	}
 }
 
-func serveRoot(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Message Relay Bot API")
-}
-
-func userMessagePage(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-
-	// just check that id can be parsed
-	_, err := strconv.ParseInt(vars["id"], 10, 0)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprintf(w, "User not found")
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `<form method="POST"><label for="message">Message:</label><textarea name="message"></textarea><br><button type="submit">Send</button></form>`)
-}
-
-// TODO: use api object for handler ctx
-func userMessageSend(tg tgapi.Api) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-
-		chatId, err := strconv.ParseInt(vars["id"], 10, 0)
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, "User not found")
-			return
-		}
-
-		err = r.ParseForm()
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "Error parsing form: %v", err)
-			return
-		}
-
-		text := r.FormValue("message")
-		if text == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			fmt.Fprintf(w, "Missing message text")
-			return
-		}
-
-		_, err = tg.SendMessage(&tgapi.NewMessage{
-			ChatId: int(chatId),
-			Text:   text,
-		})
-
-		// TODO: different responses for different errors
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "Error sending message: %v", err)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "Message sent")
-	}
-}
-
-func serveApi(addr string, api tgapi.Api) {
-	r := mux.NewRouter()
-	r.StrictSlash(true)
-	r.HandleFunc("/", serveRoot).Methods("GET")
-	r.HandleFunc("/u/{id}/message", userMessagePage).Methods("GET")
-	r.HandleFunc("/u/{id}/message", userMessageSend(api)).Methods("POST")
-	http.ListenAndServe(addr, r)
-}
-
 func main() {
 	token := os.Getenv("TG_BOT_TOKEN")
 	if token == "" {
@@ -142,10 +68,11 @@ func main() {
 	fmt.Println("Starting bot service")
 	go serveBot(tg)
 
+	api := api.New(tg)
 	addr := os.Getenv("API_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 	fmt.Printf("Starting api service on %s\n", addr)
-	serveApi(addr, tg)
+	api.ServeAddr(addr)
 }
